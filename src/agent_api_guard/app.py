@@ -1,30 +1,29 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from .config import Settings
 from .controls import AdmissionControl, CapacityRejected, ConcurrencyLimit
-from .proxy import forward
+from .transports import HttpxTransport, UpstreamTransport, UpstreamUnavailable
 
 
 def create_app(
     settings: Settings | None = None,
     control: AdmissionControl | None = None,
-    transport: httpx.AsyncBaseTransport | None = None,
+    transport: UpstreamTransport | None = None,
 ) -> FastAPI:
     resolved_settings = settings or Settings.from_env()
     resolved_control = control or ConcurrencyLimit(resolved_settings.max_in_flight)
+    resolved_transport = transport or HttpxTransport(
+        upstream_url=resolved_settings.upstream_url,
+        timeout_seconds=resolved_settings.upstream_timeout_seconds,
+    )
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        async with httpx.AsyncClient(
-            timeout=resolved_settings.upstream_timeout_seconds,
-            transport=transport,
-        ) as client:
-            app.state.client = client
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        async with resolved_transport.lifecycle():
             yield
 
     application = FastAPI(title="Agent API Guard", version="0.1.0", lifespan=lifespan)
@@ -44,18 +43,14 @@ def create_app(
     async def proxy(request: Request) -> Response:
         try:
             async with resolved_control.admission(request):
-                return await forward(
-                    request,
-                    request.app.state.client,
-                    resolved_settings.upstream_url,
-                )
+                return await resolved_transport.forward(request)
         except CapacityRejected:
             return JSONResponse(
                 status_code=429,
                 content={"error": "upstream capacity limit reached"},
                 headers={"Retry-After": "1"},
             )
-        except httpx.HTTPError:
+        except UpstreamUnavailable:
             return JSONResponse(status_code=502, content={"error": "upstream unavailable"})
 
     return application

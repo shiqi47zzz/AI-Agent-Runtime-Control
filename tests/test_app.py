@@ -3,6 +3,7 @@ import pytest
 
 from agent_api_guard.app import create_app
 from agent_api_guard.config import Settings
+from agent_api_guard.transports import HttpxTransport
 
 
 @pytest.mark.asyncio
@@ -12,7 +13,11 @@ async def test_health_and_proxy() -> None:
 
     app = create_app(
         Settings("http://backend.test", max_in_flight=1),
-        transport=httpx.MockTransport(upstream),
+        transport=HttpxTransport(
+            upstream_url="http://backend.test",
+            timeout_seconds=30,
+            http_transport=httpx.MockTransport(upstream),
+        ),
     )
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(
